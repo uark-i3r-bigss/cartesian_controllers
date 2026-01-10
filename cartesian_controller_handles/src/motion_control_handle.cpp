@@ -59,6 +59,8 @@ rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 MotionControlHandle::on_activate(const rclcpp_lifecycle::State & previous_state)
 {
   // Get state handles.
+  // Reserve capacity for ordered interfaces to satisfy realtime constraints
+  m_joint_handles.reserve(m_joint_names.size());
   if (!controller_interface::get_ordered_interfaces(
         state_interfaces_, m_joint_names, hardware_interface::HW_IF_POSITION, m_joint_handles))
   {
