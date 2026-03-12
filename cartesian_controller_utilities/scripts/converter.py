@@ -42,36 +42,135 @@ import sys
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import WrenchStamped
+from sensor_msgs.msg import Joy
 
 
 class converter(Node):
     """Convert Twist messages to WrenchStamped"""
 
+    TRANSLATION_MODE = "translation"
+    ROTATION_MODE = "rotation"
+    COMBINED_MODE = "combined"
     def __init__(self):
         super().__init__("converter")
 
         self.twist_topic = self.declare_parameter("twist_topic", "my_twist").value
+        self.joy_topic = self.declare_parameter("joy_topic", "/spacenav/joy").value
         self.wrench_topic = self.declare_parameter("wrench_topic", "my_wrench").value
         self.frame_id = self.declare_parameter("frame_id", "world").value
+        self.translation_button_idx = int(
+            self.declare_parameter("translation_button_idx", 0).value
+        )
+        self.rotation_button_idx = int(
+            self.declare_parameter("rotation_button_idx", 1).value
+        )
+        self.command_timeout = float(self.declare_parameter("command_timeout", 0.25).value)
+        self.publish_zero_on_disable = bool(
+            self.declare_parameter("publish_zero_on_disable", True).value
+        )
         period = 1.0 / self.declare_parameter("publishing_rate", 100).value
         self.timer = self.create_timer(period, self.publish)
+        self.teleop_mode = None
+        self.teleop_enabled = False
+        self.zero_sent_while_disabled = False
+        self.last_twist_time = None
 
         self.buffer = WrenchStamped()
 
         self.pub = self.create_publisher(WrenchStamped, self.wrench_topic, 3)
         self.sub = self.create_subscription(Twist, self.twist_topic, self.twist_cb, 1)
+        self.joy_sub = self.create_subscription(Joy, self.joy_topic, self.joy_cb, 1)
+        self.get_logger().info(
+            "Hold button 0 for translation, button 1 for rotation, both for combined."
+        )
+
+    def _is_pressed(self, buttons, idx):
+        return 0 <= idx < len(buttons) and buttons[idx] == 1
+
+    def _clear_buffer(self):
+        self.buffer.wrench.force.x = 0.0
+        self.buffer.wrench.force.y = 0.0
+        self.buffer.wrench.force.z = 0.0
+        self.buffer.wrench.torque.x = 0.0
+        self.buffer.wrench.torque.y = 0.0
+        self.buffer.wrench.torque.z = 0.0
+
+    def _stamp_buffer(self, now):
+        self.buffer.header.stamp = now.to_msg()
+        self.buffer.header.frame_id = self.frame_id
+
+    def joy_cb(self, data):
+        translation_pressed = self._is_pressed(data.buttons, self.translation_button_idx)
+        rotation_pressed = self._is_pressed(data.buttons, self.rotation_button_idx)
+
+        if translation_pressed and rotation_pressed:
+            self.teleop_mode = self.COMBINED_MODE
+            self.teleop_enabled = True
+            self.zero_sent_while_disabled = False
+            return
+        if translation_pressed:
+            self.teleop_mode = self.TRANSLATION_MODE
+            self.teleop_enabled = True
+            self.zero_sent_while_disabled = False
+            return
+        if rotation_pressed:
+            self.teleop_mode = self.ROTATION_MODE
+            self.teleop_enabled = True
+            self.zero_sent_while_disabled = False
+            return
+
+        self.teleop_mode = None
+        self.teleop_enabled = False
+        self._clear_buffer()
+        self.zero_sent_while_disabled = False
 
     def twist_cb(self, data):
-        self.buffer.header.stamp = self.get_clock().now().to_msg()
-        self.buffer.header.frame_id = self.frame_id
-        self.buffer.wrench.force.x = data.linear.x
-        self.buffer.wrench.force.y = data.linear.y
-        self.buffer.wrench.force.z = data.linear.z
-        self.buffer.wrench.torque.x = data.angular.x
-        self.buffer.wrench.torque.y = data.angular.y
-        self.buffer.wrench.torque.z = data.angular.z
+        if not self.teleop_enabled or self.teleop_mode is None:
+            return
+
+        self.last_twist_time = self.get_clock().now()
+        self._stamp_buffer(self.last_twist_time)
+
+        if self.teleop_mode in (self.TRANSLATION_MODE, self.COMBINED_MODE):
+            self.buffer.wrench.force.x = data.linear.x
+            self.buffer.wrench.force.y = data.linear.y
+            self.buffer.wrench.force.z = data.linear.z
+        else:
+            self.buffer.wrench.force.x = 0.0
+            self.buffer.wrench.force.y = 0.0
+            self.buffer.wrench.force.z = 0.0
+
+        if self.teleop_mode in (self.ROTATION_MODE, self.COMBINED_MODE):
+            self.buffer.wrench.torque.x = data.angular.x
+            self.buffer.wrench.torque.y = data.angular.y
+            self.buffer.wrench.torque.z = data.angular.z
+        else:
+            self.buffer.wrench.torque.x = 0.0
+            self.buffer.wrench.torque.y = 0.0
+            self.buffer.wrench.torque.z = 0.0
 
     def publish(self):
+        now = self.get_clock().now()
+
+        if not self.teleop_enabled:
+            if self.publish_zero_on_disable and not self.zero_sent_while_disabled:
+                self._clear_buffer()
+                self._stamp_buffer(now)
+                try:
+                    self.pub.publish(self.buffer)
+                except Exception:
+                    pass
+                self.zero_sent_while_disabled = True
+            return
+
+        timeout_ns = int(self.command_timeout * 1e9)
+        if (
+            self.last_twist_time is None
+            or (now - self.last_twist_time).nanoseconds > timeout_ns
+        ):
+            # Drop stale commands when input updates stop unexpectedly.
+            self._clear_buffer()
+            self._stamp_buffer(now)
         try:
             self.pub.publish(self.buffer)
         except Exception:
