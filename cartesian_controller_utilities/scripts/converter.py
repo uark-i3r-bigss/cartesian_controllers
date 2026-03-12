@@ -81,7 +81,7 @@ class converter(Node):
         self.sub = self.create_subscription(Twist, self.twist_topic, self.twist_cb, 1)
         self.joy_sub = self.create_subscription(Joy, self.joy_topic, self.joy_cb, 1)
         self.get_logger().info(
-            "Hold button 0 for translation, button 1 for rotation, both for combined."
+            "Hold LEFT button for translation, RIGHT button for rotation, both for combined."
         )
 
     def _is_pressed(self, buttons, idx):
