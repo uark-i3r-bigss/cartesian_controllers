@@ -72,6 +72,10 @@ class converter(Node):
         self.timer = self.create_timer(period, self.publish)
         self.teleop_mode = None
         self.teleop_enabled = False
+        self.translation_enabled = False
+        self.rotation_enabled = False
+        self.prev_translation_pressed = False
+        self.prev_rotation_pressed = False
         self.zero_sent_while_disabled = False
         self.last_twist_time = None
 
@@ -81,7 +85,7 @@ class converter(Node):
         self.sub = self.create_subscription(Twist, self.twist_topic, self.twist_cb, 1)
         self.joy_sub = self.create_subscription(Joy, self.joy_topic, self.joy_cb, 1)
         self.get_logger().info(
-            "Hold LEFT button for translation, RIGHT button for rotation, both for combined."
+            "Press LEFT to toggle translation, RIGHT to toggle rotation, both together to enable combined."
         )
 
     def _is_pressed(self, buttons, idx):
@@ -99,29 +103,45 @@ class converter(Node):
         self.buffer.header.stamp = now.to_msg()
         self.buffer.header.frame_id = self.frame_id
 
-    def joy_cb(self, data):
-        translation_pressed = self._is_pressed(data.buttons, self.translation_button_idx)
-        rotation_pressed = self._is_pressed(data.buttons, self.rotation_button_idx)
-
-        if translation_pressed and rotation_pressed:
+    def _update_mode_from_toggles(self):
+        if self.translation_enabled and self.rotation_enabled:
             self.teleop_mode = self.COMBINED_MODE
             self.teleop_enabled = True
-            self.zero_sent_while_disabled = False
             return
-        if translation_pressed:
+        if self.translation_enabled:
             self.teleop_mode = self.TRANSLATION_MODE
             self.teleop_enabled = True
-            self.zero_sent_while_disabled = False
             return
-        if rotation_pressed:
+        if self.rotation_enabled:
             self.teleop_mode = self.ROTATION_MODE
             self.teleop_enabled = True
-            self.zero_sent_while_disabled = False
             return
 
         self.teleop_mode = None
         self.teleop_enabled = False
-        self._clear_buffer()
+
+    def joy_cb(self, data):
+        translation_pressed = self._is_pressed(data.buttons, self.translation_button_idx)
+        rotation_pressed = self._is_pressed(data.buttons, self.rotation_button_idx)
+        translation_edge = translation_pressed and not self.prev_translation_pressed
+        rotation_edge = rotation_pressed and not self.prev_rotation_pressed
+        previous_mode = self.teleop_mode
+
+        if translation_edge and rotation_edge:
+            # Simultaneous press always enables combined mode.
+            self.translation_enabled = True
+            self.rotation_enabled = True
+        elif translation_edge:
+            self.translation_enabled = not self.translation_enabled
+        elif rotation_edge:
+            self.rotation_enabled = not self.rotation_enabled
+
+        self._update_mode_from_toggles()
+        self.prev_translation_pressed = translation_pressed
+        self.prev_rotation_pressed = rotation_pressed
+
+        if not self.teleop_enabled or previous_mode != self.teleop_mode:
+            self._clear_buffer()
         self.zero_sent_while_disabled = False
 
     def twist_cb(self, data):
